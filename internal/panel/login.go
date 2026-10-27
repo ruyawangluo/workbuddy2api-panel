@@ -238,6 +238,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
 		return
 	}
+	// 上游按浏览器登录态签发 uid：同一浏览器已登录 WorkBuddy 时，新发起的授权链接
+	// 会直接复用该账号，返回与池中已有账号相同的 uid。此时 Add 按 uid 覆盖凭证，
+	// 账号数不变，前端若仍提示「已添加」会让人误以为新增成功，故显式区分。
+	existing := p.cfg.Pool.AuthByUID(acct.UID) != nil
 	p.cfg.Pool.Add(a)
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
@@ -279,12 +283,17 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	p.loginMu.Lock()
 	delete(p.logins, state)
 	p.loginMu.Unlock()
-	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
+	if existing {
+		log.Printf("panel: 登录账号已在池中 uid=%s nickname=%q realm=%s — 已刷新凭证与昵称，未新增", acct.UID, acct.Nickname, sess.realm)
+	} else {
+		log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"done":            true,
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
 		"realm":           sess.realm,
+		"existing":        existing,
 		"credits":         remain,
 		"credits_total":   total,
 		"checkin_message": checkinMsg,
