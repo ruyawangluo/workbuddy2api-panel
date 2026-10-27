@@ -12,6 +12,10 @@ services:
       - TZ=Asia/Shanghai
     ports:
       - "7863:7863"
+    # 接入 1Panel 默认桥接网络：可与 1Panel 应用商店/网站反向代理的容器按容器名互访。
+    # 该网络需已存在（1Panel 安装后默认创建），否则 compose 会报 network not found。
+    networks:
+      - 1panel-network
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
@@ -20,3 +24,7 @@ services:
       # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
       # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
       - ./config.json:/app/config.json
+
+networks:
+  1panel-network:
+    external: true
