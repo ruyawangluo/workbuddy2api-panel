@@ -31,7 +31,9 @@ COPY scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
 # 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
 COPY config.example.json /app/config.json
-USER app
+# 默认以 root(0) 运行：宿主机挂载目录（./auths ./data）由 docker 自动创建时属主
+# 为 root，非 root 用户会因无写权限启动失败（需手动 chown 10001）。以 root 运行
+# 可直接写这些目录，无需额外处理；如需降权可用 compose 的 user 指定 uid:gid。
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1

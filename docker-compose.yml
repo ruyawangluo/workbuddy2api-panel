@@ -3,14 +3,11 @@ services:
     build: .
     container_name: workbuddy2api
     restart: unless-stopped
-    # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
-    # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
-    #   1) 非 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：
-    #      PUID=$(id -u) PGID=$(id -g) docker compose up -d
-    #      或写进 .env 文件：PUID=1000 / PGID=1000
-    #   2) sudo chown -R 10001:10001 ./auths ./data ./config.json
-    #   3) user: "0:0" 以 root 运行（省事但容器逃逸面更大，自担）
-    user: "${PUID:-10001}:${PGID:-10001}"
+    # 容器默认以 root(0) 运行：宿主机挂载目录（./auths ./data ./config.json）由
+    # docker 自动创建时属主为 root，以 root 运行可直接写入，无需手动 chown。
+    # 如需降权运行，可设置 PUID/PGID（例如 PUID=1000 PGID=1000），此时需确保
+    # 挂载目录对该 uid 可写（chown -R 1000:1000 ./auths ./data ./config.json）。
+    user: "${PUID:-0}:${PGID:-0}"
     environment:
       - TZ=Asia/Shanghai
     ports:
