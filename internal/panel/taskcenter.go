@@ -475,15 +475,10 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 		return "已达标（补领失败，可在列表手动重试；进度 " + taskProgressText(before) + "）", nil
 	}
 	// 上游对 not_accepted 的任务不计数：队列外部虽已批量 accept，但 mp 口径与
-	// accept 未落账时仍需逐任务兜底，与单任务「一键」同口径。
+	// accept 未落账时仍需逐任务兜底，与单任务「一键」同口径。accept 后回读验证
+	// 是否真正登记（200+OK 但未落账的形态会让后续上报全部不计数）。
 	if before.AcceptStatus == "not_accepted" || before.AcceptStatus == "" {
-		if isMP {
-			p.acceptWithVerifyMP(a, code)
-		} else if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
-			log.Printf("panel: 队列 accept uid=%s code=%s: %v（不阻塞）", a.UID, code, err)
-		} else {
-			time.Sleep(reportGap)
-		}
+		p.acceptWithVerify(a, code)
 		if t2, e := p.taskByCode(a, code); e == nil && t2 != nil {
 			before = t2
 		}
@@ -510,11 +505,21 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
 		}
 	}
-	if after != nil {
-		msg += "（进度 " + taskProgressText(after) + "）"
+	// 上报 200 ≠ 计分：只有回读进度达标（或已领取）才算完成。未达标时返回
+	// 非 nil，让队列项标“未归账”而非“完成”——否则界面显示完成、上游任务
+	// 却仍在、积分未加。
+	if after == nil {
+		log.Printf("panel: 队列 growth uid=%s code=%s: %s（回读失败）", a.UID, code, msg)
+		return msg, fmt.Errorf("%s；回读失败，无法确认进度", msg)
 	}
-	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
-	return msg, nil
+	prog := taskProgressText(after)
+	if after.Claimed || (after.Target > 0 && after.Current >= after.Target) {
+		msg += "（进度 " + prog + "）"
+		log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
+		return msg, nil
+	}
+	log.Printf("panel: 队列 growth uid=%s code=%s: %s（进度 %s，未归账）", a.UID, code, msg, prog)
+	return msg + "（进度 " + prog + "）", fmt.Errorf("%s；上报成功但上游未计分（进度 %s）", msg, prog)
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

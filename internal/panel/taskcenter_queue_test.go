@@ -186,3 +186,65 @@ func TestGrowthQueueClaimsDoneWithoutRerun(t *testing.T) {
 		t.Fatalf("items=%+v, want 1 项 done", items)
 	}
 }
+
+// TestGrowthQueueUncreditedNotDone 复现「上报 200 但上游未计分」：任务仍 0/1 时
+// 队列项不能标 done（否则界面显示完成、任务却仍在、积分未加），应标 error 并
+// 带真实进度。
+func TestGrowthQueueUncreditedNotDone(t *testing.T) {
+	oldGap, oldPoll := reportGap, claimPollGap
+	reportGap, claimPollGap = 0, 0
+	defer func() { reportGap, claimPollGap = oldGap, oldPoll }()
+
+	var reports, claims int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/activity/growth/tasks" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "OK", "data": map[string]any{"tasks": []map[string]any{
+				{"task_code": "Buddy_App", "title": "进入应用", "target": 1, "current": 0, "accept_status": "accepted"},
+			}}})
+		case r.URL.Path == "/v2/report":
+			atomic.AddInt32(&reports, 1)
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "OK", "data": map[string]any{}})
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			atomic.AddInt32(&claims, 1)
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "OK", "data": map[string]any{}})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "OK", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	pl := pool.New("")
+	pl.Add(&auth.Auth{UID: "u1", AccessToken: "at-u1", Nickname: "A"})
+	p := &Panel{cfg: Config{Pool: pl, Upstream: &upstream.Client{
+		HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL,
+	}}}
+
+	started, total, _, msg := p.startGrowthQueue(1, true)
+	if !started {
+		t.Fatalf("queue not started: total=%d msg=%s", total, msg)
+	}
+
+	waitQueueDone(t, p)
+
+	if got := atomic.LoadInt32(&reports); got != 1 {
+		t.Errorf("report=%d want 1", got)
+	}
+	if got := atomic.LoadInt32(&claims); got != 0 {
+		t.Errorf("claim=%d want 0（未达标不应领奖）", got)
+	}
+
+	q := p.queue()
+	q.mu.Lock()
+	items := append([]queueItem(nil), q.items...)
+	q.mu.Unlock()
+	if len(items) != 1 {
+		t.Fatalf("items=%+v, want 1 项", items)
+	}
+	if items[0].Status != "error" {
+		t.Fatalf("item status=%s want error（未归账不能标完成）", items[0].Status)
+	}
+	if !strings.Contains(items[0].Message, "0/1") {
+		t.Fatalf("item message=%q want 含进度 0/1", items[0].Message)
+	}
+}

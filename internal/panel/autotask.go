@@ -293,6 +293,28 @@ func (p *Panel) taskByCodeMP(a *auth.Auth, code string) (*upstream.Task, error) 
 	return nil, nil
 }
 
+// acceptWithVerify accept 并回读验证登记生效（默认口径；mp 见
+// acceptWithVerifyMP）。上游存在 200+OK 但 accept 未真正登记的形态，此时上报
+// 事件全部不归账——判定以回读 accept_status 为准，未生效重试一次。
+func (p *Panel) acceptWithVerify(a *auth.Auth, code string) bool {
+	if isMPTaskCode(code) {
+		return p.acceptWithVerifyMP(a, code)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
+			log.Printf("autotask %s %s: accept 尝试%d: %v", logfmt.Label(a.UID, a.Nickname), code, attempt, err)
+			continue
+		}
+		time.Sleep(reportGap)
+		t, err := p.taskByCode(a, code)
+		if err == nil && t != nil && t.AcceptStatus != "not_accepted" && t.AcceptStatus != "" {
+			return true
+		}
+		log.Printf("autotask %s %s: accept 尝试%d 未登记生效（回读=%q）", logfmt.Label(a.UID, a.Nickname), code, attempt, acceptStatusOr(t))
+	}
+	return false
+}
+
 // acceptWithVerifyMP accept 并回读验证登记生效：上游存在 200+OK 但 accept 未真正
 // 登记的形态（此时上报事件全部不归账，任务永远点不亮，上游 task_runner c793ae3
 // 实测）——判定以回读 accept_status 为准，未生效重试一次。
