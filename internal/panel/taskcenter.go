@@ -389,27 +389,61 @@ func (p *Panel) queueSet(q *queueState, uid string, fn func(*queueItem)) {
 	}
 }
 
-// acceptPendingTasks 批量接受该账号未接受的任务，返回接受的个数（失败返回 0 不阻塞）。
+// acceptPendingTasks 批量接受该账号未接受的任务（默认/mp 口径分开提交，
+// 返回接受成功的个数；失败不阻塞。mp 任务只在 mp 列表下发，且 accept 要求
+// X-Client-Platform 头——混提交会让 mp 任务报 task not found（sweep 同口径）。
 func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		return 0
 	}
-	var codes []string
+	mpOnly := map[string]bool{}
+	if mpTasks, mErr := p.cfg.Upstream.ListTasksMP(a); mErr == nil {
+		seen := map[string]bool{}
+		for _, t := range tasks {
+			seen[t.TaskCode] = true
+		}
+		for _, t := range mpTasks {
+			if seen[t.TaskCode] {
+				continue
+			}
+			mpOnly[t.TaskCode] = true
+			tasks = append(tasks, t)
+		}
+	}
+	var codes, mpCodes []string
 	for _, t := range tasks {
-		if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+		if t.Claimed || t.Locked {
+			continue
+		}
+		if t.AcceptStatus == "accepted" || t.AcceptStatus == "completed" {
+			continue
+		}
+		if isMPTaskCode(t.TaskCode) || mpOnly[t.TaskCode] {
+			mpCodes = append(mpCodes, t.TaskCode)
+		} else {
 			codes = append(codes, t.TaskCode)
 		}
 	}
-	if len(codes) == 0 {
-		return 0
+	n := 0
+	if len(codes) > 0 {
+		if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+			log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
+		} else {
+			n += len(codes)
+		}
 	}
-	if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
-		log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
-		return 0
+	if len(mpCodes) > 0 {
+		if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
+			log.Printf("panel: 队列 accept-mp uid=%s: %v（不阻塞）", a.UID, err)
+		} else {
+			n += len(mpCodes)
+		}
 	}
-	log.Printf("panel: 队列 accept uid=%s: 已接受 %d 个任务", a.UID, len(codes))
-	return len(codes)
+	if n > 0 {
+		log.Printf("panel: 队列 accept uid=%s: 已接受 %d 个任务", a.UID, n)
+	}
+	return n
 }
 
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
@@ -430,6 +464,29 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	isMP := isMPTaskCode(code)
 	if before.Claimed {
 		return "已完成（已领取）", nil
+	}
+	// 已达标未领：直接补领，不重跑行为链路——重跑可能失败或被上游判无效
+	// （与 runAutoAll / 单任务「一键」同口径）。
+	if before.Claimable {
+		credit, energy, cerr := claimTaskReward(p, a, code)
+		if cerr == nil {
+			return fmt.Sprintf("已达标，补领 +%d 分 +%d 能（进度 %s）", credit, energy, taskProgressText(before)), nil
+		}
+		return "已达标（补领失败，可在列表手动重试；进度 " + taskProgressText(before) + "）", nil
+	}
+	// 上游对 not_accepted 的任务不计数：队列外部虽已批量 accept，但 mp 口径与
+	// accept 未落账时仍需逐任务兜底，与单任务「一键」同口径。
+	if before.AcceptStatus == "not_accepted" || before.AcceptStatus == "" {
+		if isMP {
+			p.acceptWithVerifyMP(a, code)
+		} else if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
+			log.Printf("panel: 队列 accept uid=%s code=%s: %v（不阻塞）", a.UID, code, err)
+		} else {
+			time.Sleep(reportGap)
+		}
+		if t2, e := p.taskByCode(a, code); e == nil && t2 != nil {
+			before = t2
+		}
 	}
 	msg, err := act.run(p, a)
 	if err != nil {
