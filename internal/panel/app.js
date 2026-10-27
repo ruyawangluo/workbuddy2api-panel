@@ -402,7 +402,12 @@ function renderAccounts(list) {
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
-    const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
+    // 模型级限流不再内联展开（会撑开状态列、挤坏整表），改为一个可点击标签，
+    // 点开弹窗看明细。
+    const hasLimits = Array.isArray(s.rate_limited_models) && s.rate_limited_models.some(r => r && r.model);
+    const limitBtn = hasLimits
+      ? '<button class="tag warn" data-a="limits" data-u="' + esc(s.uid) + '" title="查看不可用的模型明细">部分模型不可用</button>'
+      : '';
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
@@ -437,7 +442,7 @@ function renderAccounts(list) {
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
+      '<td>' + tag + note + (limitBtn ? ' ' + limitBtn : '') + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -465,6 +470,18 @@ function renderAccounts(list) {
       '</td></tr>';
   }).join('');
 }
+
+// openLimits 展示单个账号的模型级限流明细（账号池状态列的「部分模型不可用」标签）。
+function openLimits(uid) {
+  const s = ((overviewData && overviewData.accounts) || []).find(x => x.uid === uid);
+  if (!s) return;
+  $('limWho').textContent = s.nickname || uid;
+  $('limBody').innerHTML = rateLimitRowsHtml(s.rate_limited_models, Date.now())
+    || '<div class="empty">当前没有模型级限流。</div>';
+  $('limitsVeil').classList.add('on');
+}
+function closeLimits() { $('limitsVeil').classList.remove('on'); }
+if ($('btnCloseLimits')) $('btnCloseLimits').onclick = closeLimits;
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
@@ -539,6 +556,7 @@ $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  if (a === 'limits') { openLimits(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
