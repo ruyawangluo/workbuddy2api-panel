@@ -674,6 +674,22 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"})
 		return
 	}
+	// 上游对 not_accepted 的任务不计数：单任务「一键」此前漏了这步，表现为上报
+	// 200 但进度一直 not_accepted、无法领奖。与队列 / 一键完成全部同口径，先 accept
+	// 再上报；失败不阻塞（行为事件才是进度判据）。
+	if before.AcceptStatus == "not_accepted" || before.AcceptStatus == "" {
+		if isMP {
+			p.acceptWithVerifyMP(a, act.TaskCode)
+		} else if err := p.cfg.Upstream.AcceptTasks(a, []string{act.TaskCode}); err != nil {
+			log.Printf("panel: 单任务 accept uid=%s code=%s: %v（不阻塞）", uid, act.TaskCode, err)
+		} else {
+			time.Sleep(reportGap) // 给上游状态流转留时间
+		}
+		// accept 后重读：让 progress_before 反映接受后的真实状态。
+		if t2, e := p.taskByCode(a, act.TaskCode); e == nil && t2 != nil {
+			before = t2
+		}
+	}
 	msg, err := act.run(p, a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
